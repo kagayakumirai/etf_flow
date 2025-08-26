@@ -100,10 +100,9 @@ def parse_matrix(html: str):
             break
 
     if not target:
-        if os.getenv("DEBUG") == "1":
-            print(f"[debug] day_key={day_key}")
-            print("[debug] sample date cells:", " | ".join(sample_dates))
-        return day_key, [], 0.0, headers
+        print(f"[debug] day_key={day_key}")
+        print("[debug] sample date cells:", " | ".join(sample_dates))
+
 
     # 集計
     flows: List[Tuple[str, float]] = []
