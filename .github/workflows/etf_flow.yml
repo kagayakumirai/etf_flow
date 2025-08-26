@@ -1,3 +1,4 @@
+
 name: ETF Flow Daily
 
 on:
@@ -20,8 +21,9 @@ jobs:
           pip install requests beautifulsoup4 playwright
           python -m playwright install --with-deps chromium
 
-      - name: Run ETF Flow Sentry (Playwright)
+      - name: Run ETF Flow Sentry (Playwright matrix)
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: |
           python etf_flow_sentry_playwright.py
+
