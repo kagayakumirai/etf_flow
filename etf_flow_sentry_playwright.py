@@ -100,11 +100,13 @@ def parse_matrix(html: str):
             break
 
     if not target:
-        # ← ここは必ず出す（DEBUG環境変数に依存しない）
-        print(f"[debug] day_key={day_key}")
-        print("[debug] sample date cells:", " | ".join(sample_dates))
-        print("[debug] headers:", headers)
+        print("========== DEBUG START ==========")
+        print(f"[debug] day_key = {day_key}")                # 例: "25 Aug 2025"
+        print("[debug] headers:", headers)                   # 1列目がDateになっているか
+        print("[debug] sample date cells:", " | ".join(sample_dates))  # テーブル先頭の数件
+        print("=========== DEBUG END ===========")
         return day_key, [], 0.0, headers
+
 
 
 
@@ -142,7 +144,7 @@ def send_discord(day_key: str, flows: List[Tuple[str,float]], net: float, webhoo
     r.raise_for_status()
 
 if __name__ == "__main__":
-    print("[boot] ETF Flow Sentry Playwright v2.1")
+    print("[boot] ETF Flow Sentry Playwright v2.2 (debug hard)")
     webhook = os.getenv("DISCORD_WEBHOOK")
     if not webhook:
         raise RuntimeError("DISCORD_WEBHOOK not set")
