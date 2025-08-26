@@ -143,93 +143,100 @@ def send_discord(day_key: str, flows: List[Tuple[str,float]], net: float, webhoo
     r = requests.post(webhook, json={"embeds":[embed]}, timeout=20)
     r.raise_for_status()
 
+from datetime import datetime, timezone, timedelta
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+
 def parse_via_playwright_row():
+    def _norm(s): return " ".join(s.replace("\xa0"," ").split()).strip()
+    def _num(s):
+        s = _norm(s).replace(",","")
+        if s in {"", "-", "–", "—"}: return 0.0
+        if s.startswith("(") and s.endswith(")"):
+            try: return -float(s[1:-1])
+            except: return 0.0
+        try: return float(s)
+        except: return 0.0
+
+    today_jst = datetime.now(timezone.utc) + timedelta(hours=9)
+    yday = (today_jst - timedelta(days=1)).date()
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        ctx = browser.new_context(
-            locale="en-US",
-            user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/124.0.0.0 Safari/537.36")
-        )
+        ctx = browser.new_context(locale="en-US")
         page = ctx.new_page()
-        page.set_default_timeout(45000)  # 45s に延長
-
-        # 1) 厳しすぎた networkidle をやめて domcontentloaded に
+        page.set_default_timeout(45000)
         page.goto(URL, wait_until="domcontentloaded", timeout=45000)
-        # 少しだけ待つ（遅延読み込み対策）
         page.wait_for_timeout(1200)
 
-        # 2) テーブルを待機（失敗したらフォールバックで続行）
+        tables = page.locator("table")
+        if tables.count() == 0:
+            print("[error] no <table> found on page")
+            browser.close()
+            return yday.strftime("%d %b %Y"), [], 0.0, []
+
+        # Fee+IBIT を含む表を優先、なければ先頭の表
         target_table = None
-        try:
-            # 「Fee」を含む表が現れるまで待機
-            page.wait_for_selector("table:has-text('Fee') tr", timeout=15000)
-            tables = page.locator("table")
-            print(f"[debug] found {tables.count()} tables on page")
-            for i in range(tables.count()):
-                txt = tables.nth(i).inner_text()
-                if "Fee" in txt and "IBIT" in txt:
-                    target_table = tables.nth(i)
-                    print(f"[debug] using table index {i}")
-                    break
-        except PWTimeout:
-            print("[warn] table wait timed out; falling back to first <table>")
-
-        # 3) フォールバック：最初の table を使ってみる
+        for i in range(tables.count()):
+            txt = tables.nth(i).inner_text()
+            if "Fee" in txt and "IBIT" in txt:
+                target_table = tables.nth(i)
+                break
         if target_table is None:
-            tables = page.locator("table")
-            if tables.count() == 0:
-                print("[error] no <table> found on page")
-                browser.close()
-                return day_key, [], 0.0, []
             target_table = tables.nth(0)
-            print("[debug] fallback using first table")
 
-        # 見出し行
+        # 見出し
         header_cells = target_table.locator("tr").nth(0).locator("th,td")
-        headers = [" ".join(c.inner_text().replace("\xa0"," ").split()).strip()
-                   for c in header_cells.all()]
-        print("[debug] headers:", headers)
+        headers = [_norm(c.inner_text()) for c in header_cells.all()]
 
         rows = target_table.locator("tr")
         n = rows.count()
-        print(f"[debug] rows in table: {n}")
 
-        # 前日行を探す（部分一致）
-        def _norm(s): return " ".join(s.replace("\xa0"," ").split()).strip()
-        target_cells = None
+        # すべての行の左端セルを日付として試し、yday 以下の最大日付を選ぶ
+        best_idx = None
+        best_date = None
         for i in range(1, n):
             cells = rows.nth(i).locator("td")
             if cells.count() == 0:
                 continue
-            date_text = _norm(cells.nth(0).inner_text())
-            if day_key.lower() in date_text.lower():
-                target_cells = [_norm(cells.nth(j).inner_text()) for j in range(cells.count())]
-                print(f"[debug] matched row index {i}: date_cell='{date_text}'")
-                break
+            raw = _norm(cells.nth(0).inner_text())
+            # 日付パース（例: "25 Aug 2025" / "Mon 25 Aug 2025" 等）
+            parts = raw.split()
+            if len(parts) >= 3:
+                try:
+                    cand = datetime.strptime(" ".join(parts[-3:]), "%d %b %Y").date()
+                except Exception:
+                    continue
+                if cand <= yday and (best_date is None or cand > best_date):
+                    best_date, best_idx = cand, i
 
-        # 先頭数行のDateセルをダンプ（見つからない時の診断）
-        if target_cells is None:
+        if best_idx is None:
+            print("[debug] could not parse any date ≤ yesterday")
             sample = []
             for i in range(1, min(6, n)):
                 try:
-                    sample.append(_norm(rows.nth(i).locator('td').nth(0).inner_text()))
+                    sample.append(_norm(rows.nth(i).locator("td").nth(0).inner_text()))
                 except Exception:
                     pass
             print("[debug] sample date cells:", " | ".join(sample))
+            browser.close()
+            return yday.strftime("%d %b %Y"), [], 0.0, headers
 
+        # 抽出
+        cells = rows.nth(best_idx).locator("td")
+        target_cells = [_norm(cells.nth(j).inner_text()) for j in range(cells.count())]
+        day_key = best_date.strftime("%d %b %Y")
         browser.close()
 
+    # 集計（左端=Date, 右端=Total）
+    flows, net = [], 0.0
+    for col, cell in zip(headers[1:-1], target_cells[1:-1]):
+        v = _num(cell)
+        flows.append((col, v))
+        net += v
+    return day_key, flows, net, headers
 
-        # 集計（左端=Date, 右端=Total）
-        flows, net = [], 0.0
-        for col, cell in zip(headers[1:-1], target_cells[1:-1]):
-            v = _num(cell)
-            flows.append((col, v))
-            net += v
-        return day_key, flows, net, headers
+
+
 
 
 if __name__ == "__main__":
