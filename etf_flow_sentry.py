@@ -94,14 +94,21 @@ def send_discord(yesterday, flows, net_btc, webhook):
     r.raise_for_status()
 
 if __name__ == "__main__":
-    webhook = os.getenv("DISCORD_WEBHOOK")
-    if not webhook:
-        raise RuntimeError("DISCORD_WEBHOOK not set")
+    import sys, traceback
+    try:
+        print("[boot] ETF Flow Sentry Playwright v2.3 (row-scan)")
+        webhook = os.getenv("DISCORD_WEBHOOK")
+        if not webhook:
+            raise RuntimeError("DISCORD_WEBHOOK not set")
 
-    yday, flows, net_btc = fetch_flows()
-    if not flows:
-        # データが無ければ黙って終了
-        print(f"[info] No ETF flow data for {yday} yet. (silent)")
-    else:
-        send_discord(yday, flows, net_btc, webhook)
-        print(f"[ok] Sent ETF flows for {yday} (items={len(flows)}, net={net_btc:+,} BTC)")
+        day_key, flows, net, headers = parse_via_playwright_row()
+
+        if flows:
+            send_discord(day_key, flows, net, webhook)
+            print(f"[ok] {day_key} items={len(flows)} net={net:+,.1f} $m")
+        else:
+            print("[info] No data yet (silent)")
+    except Exception:
+        traceback.print_exc()
+        sys.exit(1)
+
