@@ -143,14 +143,13 @@ def send_discord(day_key: str, flows: List[Tuple[str,float]], net: float, webhoo
     r = requests.post(webhook, json={"embeds":[embed]}, timeout=20)
     r.raise_for_status()
 
-
+from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
 def parse_via_playwright_row():
-    # 正規化ヘルパ
     def _norm(s: str) -> str:
-        return " ".join(s.replace("\xa0", " ").split()).strip()
+        return " ".join(s.replace("\xa0"," ").split()).strip()
     def _num(s: str) -> float:
-        s = _norm(s).replace(",", "")
+        s = _norm(s).replace(",","")
         if s in {"", "-", "–", "—"}: return 0.0
         if s.startswith("(") and s.endswith(")"):
             try: return -float(s[1:-1])
@@ -158,28 +157,45 @@ def parse_via_playwright_row():
         try: return float(s)
         except: return 0.0
 
-    # JST前日キー
     from datetime import datetime, timezone, timedelta
     today_jst = datetime.now(timezone.utc) + timedelta(hours=9)
     day_key = (today_jst - timedelta(days=1)).strftime("%d %b %Y")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        ctx = browser.new_context(locale="en-US")
+        ctx = browser.new_context(
+            locale="en-US",
+            user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/124.0.0.0 Safari/537.36")
+        )
         page = ctx.new_page()
         page.set_default_timeout(30000)
-        page.goto(URL, wait_until="domcontentloaded")
-        page.wait_for_timeout(1200)
 
-        # ヘッダ（1行目）と、左端に day_key を含む行を直接読む
-        header_cells = page.locator("table tr").nth(0).locator("th,td")
+        # 読み込みをしっかり待つ
+        page.goto(URL, wait_until="networkidle")
+        # 「Fee」を含むテーブル（フローマトリクス）を狙い撃ち
+        try:
+            table = page.locator("table:has-text('Fee')").first
+            page.wait_for_selector("table:has-text('Fee') tr", timeout=15000)
+        except PWTimeout:
+            print("========== DEBUG START (row-scan) ==========")
+            print(f"[debug] day_key = {day_key}")
+            print("[debug] could not find table:has-text('Fee')")
+            print("=========== DEBUG END (row-scan) ===========")
+            browser.close()
+            return day_key, [], 0.0, []
+
+        # 見出し行（1行目）を取得（th/td混在に対応）
+        header_cells = table.locator("tr").nth(0).locator("th,td")
         headers = [ _norm(c.inner_text()) for c in header_cells.all() ]
 
-        rows = page.locator("table tr")
+        # 行を総なめ（tbody 有無を問わず tr でOK）
+        rows = table.locator("tr")
+        n = rows.count()
+
         target_cells = None
-        N = rows.count()
-        # 2行目以降を走査
-        for i in range(1, N):
+        for i in range(1, n):  # 2行目以降
             cells = rows.nth(i).locator("td")
             if cells.count() == 0:
                 continue
@@ -194,7 +210,14 @@ def parse_via_playwright_row():
         print("========== DEBUG START (row-scan) ==========")
         print(f"[debug] day_key = {day_key}")
         print("[debug] headers:", headers)
-        print("[debug] could not locate row via Playwright row scan")
+        # 先頭数行のDateを採取して可視化
+        sample = []
+        for i in range(1, min(6, n)):
+            try:
+                sample.append(_norm(rows.nth(i).locator('td').nth(0).inner_text()))
+            except Exception:
+                pass
+        print("[debug] sample date cells:", " | ".join(sample))
         print("=========== DEBUG END (row-scan) ===========")
         return day_key, [], 0.0, headers
 
@@ -207,14 +230,3 @@ def parse_via_playwright_row():
     return day_key, flows, net, headers
 
 
-if __name__ == "__main__":
-    print("[boot] ETF Flow Sentry Playwright v2.2 (debug hard)")
-    webhook = os.getenv("DISCORD_WEBHOOK")
-    if not webhook:
-        raise RuntimeError("DISCORD_WEBHOOK not set")
-    day_key, flows, net, headers = parse_via_playwright_row()
-    if flows:
-        send_discord(day_key, flows, net, webhook)
-        print(f"[ok] {day_key} items={len(flows)} net={net:+,.1f} $m")
-    else:
-        print("[info] No data yet (silent)")
