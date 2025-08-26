@@ -143,13 +143,76 @@ def send_discord(day_key: str, flows: List[Tuple[str,float]], net: float, webhoo
     r = requests.post(webhook, json={"embeds":[embed]}, timeout=20)
     r.raise_for_status()
 
+
+
+def parse_via_playwright_row():
+    # 正規化ヘルパ
+    def _norm(s: str) -> str:
+        return " ".join(s.replace("\xa0", " ").split()).strip()
+    def _num(s: str) -> float:
+        s = _norm(s).replace(",", "")
+        if s in {"", "-", "–", "—"}: return 0.0
+        if s.startswith("(") and s.endswith(")"):
+            try: return -float(s[1:-1])
+            except: return 0.0
+        try: return float(s)
+        except: return 0.0
+
+    # JST前日キー
+    from datetime import datetime, timezone, timedelta
+    today_jst = datetime.now(timezone.utc) + timedelta(hours=9)
+    day_key = (today_jst - timedelta(days=1)).strftime("%d %b %Y")
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        ctx = browser.new_context(locale="en-US")
+        page = ctx.new_page()
+        page.set_default_timeout(30000)
+        page.goto(URL, wait_until="domcontentloaded")
+        page.wait_for_timeout(1200)
+
+        # ヘッダ（1行目）と、左端に day_key を含む行を直接読む
+        header_cells = page.locator("table tr").nth(0).locator("th,td")
+        headers = [ _norm(c.inner_text()) for c in header_cells.all() ]
+
+        rows = page.locator("table tr")
+        target_cells = None
+        N = rows.count()
+        # 2行目以降を走査
+        for i in range(1, N):
+            cells = rows.nth(i).locator("td")
+            if cells.count() == 0:
+                continue
+            date_text = _norm(cells.nth(0).inner_text())
+            if day_key.lower() in date_text.lower():
+                target_cells = [ _norm(cells.nth(j).inner_text()) for j in range(cells.count()) ]
+                break
+
+        browser.close()
+
+    if not target_cells:
+        print("========== DEBUG START (row-scan) ==========")
+        print(f"[debug] day_key = {day_key}")
+        print("[debug] headers:", headers)
+        print("[debug] could not locate row via Playwright row scan")
+        print("=========== DEBUG END (row-scan) ===========")
+        return day_key, [], 0.0, headers
+
+    # 左端=Date, 右端=Total を前提に中列を集計（USD百万）
+    flows, net = [], 0.0
+    for col, cell in zip(headers[1:-1], target_cells[1:-1]):
+        v = _num(cell)
+        flows.append((col, v))
+        net += v
+    return day_key, flows, net, headers
+
+
 if __name__ == "__main__":
     print("[boot] ETF Flow Sentry Playwright v2.2 (debug hard)")
     webhook = os.getenv("DISCORD_WEBHOOK")
     if not webhook:
         raise RuntimeError("DISCORD_WEBHOOK not set")
-    html = fetch_html_with_browser()
-    day_key, flows, net, headers = parse_matrix(html)
+    day_key, flows, net, headers = parse_via_playwright_row()
     if flows:
         send_discord(day_key, flows, net, webhook)
         print(f"[ok] {day_key} items={len(flows)} net={net:+,.1f} $m")
