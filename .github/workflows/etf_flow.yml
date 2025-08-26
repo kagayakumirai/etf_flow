@@ -18,9 +18,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4 playwright
           python -m playwright install --with-deps chromium
-      - name: Run ETF Flow Sentry (Playwright matrix)
+      - name: Run ETF Flow Sentry (Playwright row-scan)
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-          DEBUG: "1"   # 一旦デバッグON。落ち着いたら削除してOK
+          PYTHONUNBUFFERED: "1"
         run: |
-          python etf_flow_sentry_playwright.py
+          set -euxo pipefail
+          echo "pwd=$(pwd)"
+          ls -la
+          python -V
+          python -u etf_flow_sentry_playwright.py
