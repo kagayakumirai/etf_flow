@@ -145,47 +145,54 @@ def send_discord(day_key: str, flows: List[Tuple[str,float]], net: float, webhoo
 
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
+from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
 def parse_via_playwright_row():
+    """Farsideの“Fee行を含む”ETFフローマトリクスをPlaywrightで直接読む"""
+    def _norm(s: str) -> str:
+        return " ".join(s.replace("\xa0", " ").split()).strip()
 
-    with sync_playwright() as p:
-    browser = p.chromium.launch(headless=True)
-    ctx = browser.new_context(locale="en-US")
-    page = ctx.new_page()
-    page.goto(URL, wait_until="networkidle")
-    page.wait_for_timeout(1500)
-
-    tables = page.locator("table")
-    count = tables.count()
-    print(f"[debug] found {count} tables on page")
-
-    
-    from datetime import datetime, timezone, timedelta
-    def _norm(s): return " ".join(s.replace("\xa0"," ").split()).strip()
-    def _num(s):
-        s = _norm(s).replace(",","")
-        if s in {"", "-", "–", "—"}: return 0.0
+    def _num(s: str) -> float:
+        s = _norm(s).replace(",", "")
+        if s in {"", "-", "–", "—"}:
+            return 0.0
         if s.startswith("(") and s.endswith(")"):
-            try: return -float(s[1:-1])
-            except: return 0.0
-        try: return float(s)
-        except: return 0.0
+            try:
+                return -float(s[1:-1])
+            except Exception:
+                return 0.0
+        try:
+            return float(s)
+        except Exception:
+            return 0.0
 
+    from datetime import datetime, timezone, timedelta
     today_jst = datetime.now(timezone.utc) + timedelta(hours=9)
     day_key = (today_jst - timedelta(days=1)).strftime("%d %b %Y")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        ctx = browser.new_context(locale="en-US")
+        ctx = browser.new_context(
+            locale="en-US",
+            user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/124.0.0.0 Safari/537.36")
+        )
         page = ctx.new_page()
+        page.set_default_timeout(30000)
+
+        # しっかり待つ
         page.goto(URL, wait_until="networkidle")
         page.wait_for_timeout(1500)
 
+        # ページ内の table を数える（デバッグ）
         tables = page.locator("table")
-        print(f"[debug] found {tables.count()} tables on page")
+        count = tables.count()
+        print(f"[debug] found {count} tables on page")
 
+        # “Fee” と “IBIT” を含むテーブルを採用
         target_table = None
-        for i in range(tables.count()):
+        for i in range(count):
             txt = tables.nth(i).inner_text()
             if "Fee" in txt and "IBIT" in txt:
                 target_table = tables.nth(i)
@@ -193,18 +200,23 @@ def parse_via_playwright_row():
                 break
 
         if not target_table:
-            print("[debug] no matching table with Fee+IBIT found")
+            print("========== DEBUG START (row-scan) ==========")
+            print(f"[debug] day_key = {day_key}")
+            print("[debug] could not find matrix table (Fee+IBIT)")
+            print("=========== DEBUG END (row-scan) ===========")
             browser.close()
             return day_key, [], 0.0, []
 
+        # 見出し行
         header_cells = target_table.locator("tr").nth(0).locator("th,td")
-        headers = [ _norm(c.inner_text()) for c in header_cells.all() ]
+        headers = [_norm(c.inner_text()) for c in header_cells.all()]
         print("[debug] headers:", headers)
 
         rows = target_table.locator("tr")
         n = rows.count()
         print(f"[debug] rows in table: {n}")
 
+        # 前日行を探す
         target_cells = None
         for i in range(1, n):
             cells = rows.nth(i).locator("td")
@@ -212,24 +224,27 @@ def parse_via_playwright_row():
                 continue
             date_text = _norm(cells.nth(0).inner_text())
             if day_key.lower() in date_text.lower():
-                target_cells = [ _norm(cells.nth(j).inner_text()) for j in range(cells.count()) ]
-                print(f"[debug] matched date row index {i}: {target_cells}")
+                target_cells = [_norm(cells.nth(j).inner_text()) for j in range(cells.count())]
+                print(f"[debug] matched row index {i}: date_cell='{date_text}'")
                 break
 
         browser.close()
 
     if not target_cells:
-        print("========== DEBUG START ==========")
+        print("========== DEBUG START (row-scan) ==========")
         print(f"[debug] day_key = {day_key}")
-        print("[debug] sample first date cells:")
+        # 先頭数行のDateセルをダンプ
+        sample = []
         for i in range(1, min(6, n)):
             try:
-                print("  ", rows.nth(i).locator("td").nth(0).inner_text())
-            except:
+                sample.append(rows.nth(i).locator("td").nth(0).inner_text())
+            except Exception:
                 pass
-        print("=========== DEBUG END ===========")
+        print("[debug] sample date cells:", " | ".join(sample))
+        print("=========== DEBUG END (row-scan) ===========")
         return day_key, [], 0.0, headers
 
+    # 集計（左端=Date, 右端=Total）
     flows, net = [], 0.0
     for col, cell in zip(headers[1:-1], target_cells[1:-1]):
         v = _num(cell)
@@ -238,4 +253,22 @@ def parse_via_playwright_row():
     return day_key, flows, net, headers
 
 
+if __name__ == "__main__":
+    import os, sys, traceback
+    try:
+        print("[boot] ETF Flow Sentry Playwright v2.4 (row-scan)")
+        webhook = os.getenv("DISCORD_WEBHOOK")
+        if not webhook:
+            raise RuntimeError("DISCORD_WEBHOOK not set")
+
+        day_key, flows, net, headers = parse_via_playwright_row()
+
+        if flows:
+            send_discord(day_key, flows, net, webhook)
+            print(f"[ok] {day_key} items={len(flows)} net={net:+,.1f} $m")
+        else:
+            print("[info] No data yet (silent)")
+    except Exception:
+        traceback.print_exc()
+        sys.exit(1)
 
