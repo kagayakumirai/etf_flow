@@ -100,10 +100,12 @@ def parse_matrix(html: str):
             break
 
     if not target:
-        # ← ここは必ず出す（if os.getenv("DEBUG") == "1": を外す）
+        # ← ここは必ず出す（DEBUG環境変数に依存しない）
         print(f"[debug] day_key={day_key}")
         print("[debug] sample date cells:", " | ".join(sample_dates))
+        print("[debug] headers:", headers)
         return day_key, [], 0.0, headers
+
 
 
     # 集計
