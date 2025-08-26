@@ -100,8 +100,10 @@ def parse_matrix(html: str):
             break
 
     if not target:
+        # ← ここは必ず出す（if os.getenv("DEBUG") == "1": を外す）
         print(f"[debug] day_key={day_key}")
         print("[debug] sample date cells:", " | ".join(sample_dates))
+        return day_key, [], 0.0, headers
 
 
     # 集計
@@ -138,6 +140,7 @@ def send_discord(day_key: str, flows: List[Tuple[str,float]], net: float, webhoo
     r.raise_for_status()
 
 if __name__ == "__main__":
+    print("[boot] ETF Flow Sentry Playwright v2.1")
     webhook = os.getenv("DISCORD_WEBHOOK")
     if not webhook:
         raise RuntimeError("DISCORD_WEBHOOK not set")
