@@ -145,10 +145,11 @@ def send_discord(day_key: str, flows: List[Tuple[str,float]], net: float, webhoo
 
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
+
 def parse_via_playwright_row():
-    def _norm(s: str) -> str:
-        return " ".join(s.replace("\xa0"," ").split()).strip()
-    def _num(s: str) -> float:
+    from datetime import datetime, timezone, timedelta
+    def _norm(s): return " ".join(s.replace("\xa0"," ").split()).strip()
+    def _num(s):
         s = _norm(s).replace(",","")
         if s in {"", "-", "–", "—"}: return 0.0
         if s.startswith("(") and s.endswith(")"):
@@ -157,76 +158,71 @@ def parse_via_playwright_row():
         try: return float(s)
         except: return 0.0
 
-    from datetime import datetime, timezone, timedelta
     today_jst = datetime.now(timezone.utc) + timedelta(hours=9)
     day_key = (today_jst - timedelta(days=1)).strftime("%d %b %Y")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        ctx = browser.new_context(
-            locale="en-US",
-            user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/124.0.0.0 Safari/537.36")
-        )
+        ctx = browser.new_context(locale="en-US")
         page = ctx.new_page()
-        page.set_default_timeout(30000)
-
-        # 読み込みをしっかり待つ
         page.goto(URL, wait_until="networkidle")
-        # 「Fee」を含むテーブル（フローマトリクス）を狙い撃ち
-        try:
-            table = page.locator("table:has-text('Fee')").first
-            page.wait_for_selector("table:has-text('Fee') tr", timeout=15000)
-        except PWTimeout:
-            print("========== DEBUG START (row-scan) ==========")
-            print(f"[debug] day_key = {day_key}")
-            print("[debug] could not find table:has-text('Fee')")
-            print("=========== DEBUG END (row-scan) ===========")
+        page.wait_for_timeout(1500)
+
+        tables = page.locator("table")
+        print(f"[debug] found {tables.count()} tables on page")
+
+        target_table = None
+        for i in range(tables.count()):
+            txt = tables.nth(i).inner_text()
+            if "Fee" in txt and "IBIT" in txt:
+                target_table = tables.nth(i)
+                print(f"[debug] using table index {i}")
+                break
+
+        if not target_table:
+            print("[debug] no matching table with Fee+IBIT found")
             browser.close()
             return day_key, [], 0.0, []
 
-        # 見出し行（1行目）を取得（th/td混在に対応）
-        header_cells = table.locator("tr").nth(0).locator("th,td")
+        header_cells = target_table.locator("tr").nth(0).locator("th,td")
         headers = [ _norm(c.inner_text()) for c in header_cells.all() ]
+        print("[debug] headers:", headers)
 
-        # 行を総なめ（tbody 有無を問わず tr でOK）
-        rows = table.locator("tr")
+        rows = target_table.locator("tr")
         n = rows.count()
+        print(f"[debug] rows in table: {n}")
 
         target_cells = None
-        for i in range(1, n):  # 2行目以降
+        for i in range(1, n):
             cells = rows.nth(i).locator("td")
             if cells.count() == 0:
                 continue
             date_text = _norm(cells.nth(0).inner_text())
             if day_key.lower() in date_text.lower():
                 target_cells = [ _norm(cells.nth(j).inner_text()) for j in range(cells.count()) ]
+                print(f"[debug] matched date row index {i}: {target_cells}")
                 break
 
         browser.close()
 
     if not target_cells:
-        print("========== DEBUG START (row-scan) ==========")
+        print("========== DEBUG START ==========")
         print(f"[debug] day_key = {day_key}")
-        print("[debug] headers:", headers)
-        # 先頭数行のDateを採取して可視化
-        sample = []
+        print("[debug] sample first date cells:")
         for i in range(1, min(6, n)):
             try:
-                sample.append(_norm(rows.nth(i).locator('td').nth(0).inner_text()))
-            except Exception:
+                print("  ", rows.nth(i).locator("td").nth(0).inner_text())
+            except:
                 pass
-        print("[debug] sample date cells:", " | ".join(sample))
-        print("=========== DEBUG END (row-scan) ===========")
+        print("=========== DEBUG END ===========")
         return day_key, [], 0.0, headers
 
-    # 左端=Date, 右端=Total を前提に中列を集計（USD百万）
     flows, net = [], 0.0
     for col, cell in zip(headers[1:-1], target_cells[1:-1]):
         v = _num(cell)
         flows.append((col, v))
         net += v
     return day_key, flows, net, headers
+
 
 
