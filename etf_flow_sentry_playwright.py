@@ -147,6 +147,19 @@ from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
 
 def parse_via_playwright_row():
+
+    with sync_playwright() as p:
+    browser = p.chromium.launch(headless=True)
+    ctx = browser.new_context(locale="en-US")
+    page = ctx.new_page()
+    page.goto(URL, wait_until="networkidle")
+    page.wait_for_timeout(1500)
+
+    tables = page.locator("table")
+    count = tables.count()
+    print(f"[debug] found {count} tables on page")
+
+    
     from datetime import datetime, timezone, timedelta
     def _norm(s): return " ".join(s.replace("\xa0"," ").split()).strip()
     def _num(s):
