@@ -2,10 +2,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ETF Flow Sentry (Farside → Discord Embed) - Playwright matrix parser
-- JST 09/12/15/18 に実行
-- Farsideの「日付×ETFの行列テーブル（USD百万）」をChromiumで取得して解析
-- 前日行が存在する場合のみDiscordにEmbed通知（無ければ黙る）
+ETF Flow Sentry (Farside → Discord Embed) - Playwright matrix parser (v2)
+- 日付一致を「部分一致（contains）」に緩和して取りこぼしを防止
+- DEBUG=1 環境変数で直近のDateセルをログ出力
 """
 
 import os
@@ -20,7 +19,6 @@ from playwright.sync_api import sync_playwright
 URL = "https://farside.co.uk/bitcoin-etf-flows/"
 
 TICKER_CANDIDATES = {"IBIT","FBTC","BITB","ARKB","BTCO","EZBC","BRRR","HODL","BTCW","GBTC","BTC"}
-NUM_RE = re.compile(r'^\(?-?\d+(?:\.\d+)?\)?$')
 
 def _norm(s: str) -> str:
     return " ".join(s.replace("\xa0"," ").split()).strip()
@@ -29,12 +27,11 @@ def _parse_number(cell: str) -> float:
     s = _norm(cell).replace(",","")
     if s in {"", "-", "–", "—"}:
         return 0.0
-    # negatives in parentheses e.g. (198.7)
     if s.startswith("(") and s.endswith(")"):
         try:
             return -float(s[1:-1])
         except:
-            pass
+            return 0.0
     try:
         return float(s)
     except:
@@ -62,8 +59,8 @@ def parse_matrix(html: str):
     header_idx = None
     headers = []
 
-    # 見出し行（ティッカーが並ぶ行）を探す
-    for i, tr in enumerate(trs[:10]):  # 冒頭数行をチェック
+    # ティッカーの見出し行を探す
+    for i, tr in enumerate(trs[:10]):
         ths = tr.find_all(["th","td"])
         texts = [_norm(th.get_text()) for th in ths]
         if any(t in TICKER_CANDIDATES for t in texts) and "Total" in texts:
@@ -74,7 +71,7 @@ def parse_matrix(html: str):
     if header_idx is None or not headers:
         return None, [], 0.0, []
 
-    # データ行を走査（ヘッダ行の次から）
+    # データ行
     data_rows = []
     for tr in trs[header_idx+1:]:
         tds = tr.find_all("td")
@@ -82,26 +79,33 @@ def parse_matrix(html: str):
             continue
         cells = [_norm(td.get_text()) for td in tds]
         if len(cells) != len(headers):
-            # Fee 行や列崩れはスキップ
             continue
         data_rows.append(dict(zip(headers, cells)))
 
-    # JST基準の前日キー
+    # JST前日キー
     today_jst = datetime.now(timezone.utc) + timedelta(hours=9)
     y = today_jst - timedelta(days=1)
     day_key = y.strftime("%d %b %Y")
 
+    # マッチング（部分一致）
     target = None
+    sample_dates = []
     for row in data_rows:
-        date_cell = _norm(row.get(headers[0], ""))  # 最左列が日付
-        if date_cell.lower() == day_key.lower():
+        date_cell = _norm(row.get(headers[0], ""))
+        if len(sample_dates) < 6:
+            sample_dates.append(date_cell)
+        if day_key.lower() in date_cell.lower():  # ← 部分一致
             target = row
+            matched_date = date_cell
             break
 
     if not target:
+        if os.getenv("DEBUG") == "1":
+            print(f"[debug] day_key={day_key}")
+            print("[debug] sample date cells:", " | ".join(sample_dates))
         return day_key, [], 0.0, headers
 
-    # 各ETF列（最左列=Date、最右列=Total）を抽出
+    # 集計
     flows: List[Tuple[str, float]] = []
     net = 0.0
     for col in headers[1:-1]:
@@ -109,14 +113,15 @@ def parse_matrix(html: str):
         flows.append((col, val))
         net += val
 
+    if os.getenv("DEBUG") == "1":
+        print(f"[debug] matched date cell: {matched_date}")
+        print(f"[debug] computed net: {net}")
+
     return day_key, flows, net, headers
 
 def send_discord(day_key: str, flows: List[Tuple[str,float]], net: float, webhook: str):
     color = 0x2ecc71 if net > 0 else 0xe74c3c if net < 0 else 0x95a5a6
-    # 非ゼロのみ並べてスッキリ表示（全部出したいなら if abs(v) > 0 else で調整）
-    shown = [(k,v) for k,v in flows if abs(v) > 0.0]
-    if not shown:
-        shown = flows[:2]  # すべて0なら先頭2件だけ見せる程度に控えめ表示
+    shown = [(k,v) for k,v in flows if abs(v) > 0.0] or flows[:2]
 
     fields = [{
         "name": k,
