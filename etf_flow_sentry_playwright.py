@@ -144,32 +144,7 @@ def send_discord(day_key: str, flows: List[Tuple[str,float]], net: float, webhoo
     r.raise_for_status()
 
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
-
-from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
-
 def parse_via_playwright_row():
-    """Farsideの“Fee行を含む”ETFフローマトリクスをPlaywrightで直接読む"""
-    def _norm(s: str) -> str:
-        return " ".join(s.replace("\xa0", " ").split()).strip()
-
-    def _num(s: str) -> float:
-        s = _norm(s).replace(",", "")
-        if s in {"", "-", "–", "—"}:
-            return 0.0
-        if s.startswith("(") and s.endswith(")"):
-            try:
-                return -float(s[1:-1])
-            except Exception:
-                return 0.0
-        try:
-            return float(s)
-        except Exception:
-            return 0.0
-
-    from datetime import datetime, timezone, timedelta
-    today_jst = datetime.now(timezone.utc) + timedelta(hours=9)
-    day_key = (today_jst - timedelta(days=1)).strftime("%d %b %Y")
-
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         ctx = browser.new_context(
@@ -179,44 +154,51 @@ def parse_via_playwright_row():
                         "Chrome/124.0.0.0 Safari/537.36")
         )
         page = ctx.new_page()
-        page.set_default_timeout(30000)
+        page.set_default_timeout(45000)  # 45s に延長
 
-        # しっかり待つ
-        page.goto(URL, wait_until="networkidle")
-        page.wait_for_timeout(1500)
+        # 1) 厳しすぎた networkidle をやめて domcontentloaded に
+        page.goto(URL, wait_until="domcontentloaded", timeout=45000)
+        # 少しだけ待つ（遅延読み込み対策）
+        page.wait_for_timeout(1200)
 
-        # ページ内の table を数える（デバッグ）
-        tables = page.locator("table")
-        count = tables.count()
-        print(f"[debug] found {count} tables on page")
-
-        # “Fee” と “IBIT” を含むテーブルを採用
+        # 2) テーブルを待機（失敗したらフォールバックで続行）
         target_table = None
-        for i in range(count):
-            txt = tables.nth(i).inner_text()
-            if "Fee" in txt and "IBIT" in txt:
-                target_table = tables.nth(i)
-                print(f"[debug] using table index {i}")
-                break
+        try:
+            # 「Fee」を含む表が現れるまで待機
+            page.wait_for_selector("table:has-text('Fee') tr", timeout=15000)
+            tables = page.locator("table")
+            print(f"[debug] found {tables.count()} tables on page")
+            for i in range(tables.count()):
+                txt = tables.nth(i).inner_text()
+                if "Fee" in txt and "IBIT" in txt:
+                    target_table = tables.nth(i)
+                    print(f"[debug] using table index {i}")
+                    break
+        except PWTimeout:
+            print("[warn] table wait timed out; falling back to first <table>")
 
-        if not target_table:
-            print("========== DEBUG START (row-scan) ==========")
-            print(f"[debug] day_key = {day_key}")
-            print("[debug] could not find matrix table (Fee+IBIT)")
-            print("=========== DEBUG END (row-scan) ===========")
-            browser.close()
-            return day_key, [], 0.0, []
+        # 3) フォールバック：最初の table を使ってみる
+        if target_table is None:
+            tables = page.locator("table")
+            if tables.count() == 0:
+                print("[error] no <table> found on page")
+                browser.close()
+                return day_key, [], 0.0, []
+            target_table = tables.nth(0)
+            print("[debug] fallback using first table")
 
         # 見出し行
         header_cells = target_table.locator("tr").nth(0).locator("th,td")
-        headers = [_norm(c.inner_text()) for c in header_cells.all()]
+        headers = [" ".join(c.inner_text().replace("\xa0"," ").split()).strip()
+                   for c in header_cells.all()]
         print("[debug] headers:", headers)
 
         rows = target_table.locator("tr")
         n = rows.count()
         print(f"[debug] rows in table: {n}")
 
-        # 前日行を探す
+        # 前日行を探す（部分一致）
+        def _norm(s): return " ".join(s.replace("\xa0"," ").split()).strip()
         target_cells = None
         for i in range(1, n):
             cells = rows.nth(i).locator("td")
@@ -228,29 +210,26 @@ def parse_via_playwright_row():
                 print(f"[debug] matched row index {i}: date_cell='{date_text}'")
                 break
 
+        # 先頭数行のDateセルをダンプ（見つからない時の診断）
+        if target_cells is None:
+            sample = []
+            for i in range(1, min(6, n)):
+                try:
+                    sample.append(_norm(rows.nth(i).locator('td').nth(0).inner_text()))
+                except Exception:
+                    pass
+            print("[debug] sample date cells:", " | ".join(sample))
+
         browser.close()
 
-    if not target_cells:
-        print("========== DEBUG START (row-scan) ==========")
-        print(f"[debug] day_key = {day_key}")
-        # 先頭数行のDateセルをダンプ
-        sample = []
-        for i in range(1, min(6, n)):
-            try:
-                sample.append(rows.nth(i).locator("td").nth(0).inner_text())
-            except Exception:
-                pass
-        print("[debug] sample date cells:", " | ".join(sample))
-        print("=========== DEBUG END (row-scan) ===========")
-        return day_key, [], 0.0, headers
 
-    # 集計（左端=Date, 右端=Total）
-    flows, net = [], 0.0
-    for col, cell in zip(headers[1:-1], target_cells[1:-1]):
-        v = _num(cell)
-        flows.append((col, v))
-        net += v
-    return day_key, flows, net, headers
+        # 集計（左端=Date, 右端=Total）
+        flows, net = [], 0.0
+        for col, cell in zip(headers[1:-1], target_cells[1:-1]):
+            v = _num(cell)
+            flows.append((col, v))
+            net += v
+        return day_key, flows, net, headers
 
 
 if __name__ == "__main__":
